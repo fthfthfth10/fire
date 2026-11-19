@@ -1,4 +1,6 @@
 import argparse
+import json
+import tempfile
 from pathlib import Path
 
 import torch
@@ -30,33 +32,75 @@ def predict_image(path, encoder, model, settings):
     return int(fire_decisions(logits, settings).item())
 
 
+def submission_names(paths, expected_count):
+    if len(paths) != expected_count:
+        raise ValueError(f"Expected {expected_count} test images, found {len(paths)}")
+    names = {path.name for path in paths}
+    if len({name.casefold() for name in names}) != expected_count:
+        raise ValueError("Test image filenames must be unique (case-insensitive)")
+    return names
+
+
+def validate_predictions(predictions, expected_names):
+    if not isinstance(predictions, dict) or predictions.keys() != expected_names:
+        raise ValueError("Predictions must cover exactly the input image filenames")
+    if any(type(value) is not int or value not in (0, 1) for value in predictions.values()):
+        raise ValueError("Every image prediction must be an integer 0 or 1")
+
+
+def unique_object(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("Duplicate keys in prediction JSON")
+    return result
+
+
+def publish_predictions(output, predictions, expected_names):
+    validate_predictions(predictions, expected_names)
+    if output.exists():
+        raise FileExistsError(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=output.parent) as temp:
+        staged = Path(temp) / "predictions.json"
+        write_json(staged, predictions)
+        with staged.open(encoding="utf-8") as stream:
+            decoded = json.load(stream, object_pairs_hook=unique_object)
+        validate_predictions(decoded, expected_names)
+        if decoded != predictions:
+            raise ValueError("Serialized predictions differ from the original predictions")
+        staged.replace(output)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Predict visible fire directly from images.")
     inputs = parser.add_mutually_exclusive_group(required=True)
     inputs.add_argument("--image", type=Path)
-    inputs.add_argument("--images", type=Path)
+    inputs.add_argument("--images", type=Path, help="Directory of exactly 5313 test images")
     parser.add_argument("--dinov3-source", type=Path, required=True)
     parser.add_argument("--weights", type=Path, required=True)
     parser.add_argument("--last", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    paths = [args.image] if args.image is not None else images(args.images)
-    if not paths or not all(path.is_file() for path in paths):
-        raise FileNotFoundError("No input images")
-    output = args.output
-    if args.images is not None and output is None:
-        output = Path("submission.json")
+    settings = config()
+    if args.image is not None:
+        if not args.image.is_file():
+            raise FileNotFoundError(args.image)
+        paths = [args.image]
+        expected_names = {args.image.name}
+        output = args.output
+    else:
+        paths = images(args.images)
+        expected_names = submission_names(paths, settings["submission_image_count"])
+        output = args.output or Path("submission.json")
     if output is not None and output.exists():
         raise FileExistsError(output)
 
-    settings = config()
     digest = weight_sha256(args.weights, settings["backbone"])
     model = load_head(args.last, settings, digest)
     encoder = FrozenDino.from_pretrained(args.dinov3_source, args.weights, settings)
     predictions = {path.name: predict_image(path, encoder, model, settings) for path in paths}
     if output is not None:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        write_json(output, predictions)
+        publish_predictions(output, predictions, expected_names)
     if args.image is not None:
         print(predictions[args.image.name])
 

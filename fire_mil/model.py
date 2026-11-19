@@ -41,11 +41,6 @@ def build_backbone(source, settings):
     return backbone
 
 
-def restore_backbone(backbone, weights):
-    state = torch.load(weights, map_location="cpu", weights_only=True)
-    backbone.load_state_dict(state, strict=True)
-
-
 def weight_sha256(weights, settings):
     if not weights.is_file():
         raise FileNotFoundError(f"Official Meta S/16 checkpoint required: {weights}")
@@ -66,8 +61,10 @@ class FrozenDino:
 
     @classmethod
     def from_pretrained(cls, source, weights, settings):
+        weight_sha256(weights, settings["backbone"])
         backbone = build_backbone(source, settings["backbone"])
-        restore_backbone(backbone, weights)
+        state = torch.load(weights, map_location="cpu", weights_only=True)
+        backbone.load_state_dict(state, strict=True)
         return cls(backbone, settings, settings["device"])
 
     @torch.inference_mode()
@@ -100,13 +97,15 @@ class FireMIL(nn.Module):
     def __init__(self, settings):
         super().__init__()
         feature_dim = settings["backbone"]["feature_dim"]
+        self.projection = nn.Linear(feature_dim, feature_dim, bias=False)
+        nn.init.eye_(self.projection.weight)
         self.bag = ABMIL(in_shape=(feature_dim,), att_dim=settings["mil"]["attention_dim"],
                          gated=True)
         self.instance = nn.Linear(feature_dim, 1)
 
     def forward(self, features, mask):
-        features = features.float()
-        return self.bag(features, mask=mask), self.instance(features).squeeze(-1)
+        shared = self.projection(features.float())
+        return self.bag(shared, mask=mask), self.instance(shared).squeeze(-1)
 
 
 def fire_decisions(logits, settings):

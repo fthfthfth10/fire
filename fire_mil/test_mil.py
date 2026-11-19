@@ -2,16 +2,15 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 from PIL import Image
 
 from common import config, read_json, save_pt, write_json
 from data import Bags, collate_bags, fill_cache, training_records
-from infer import load_head, predict_image
-from model import (
-    FireMIL, FrozenDino, build_backbone, fire_decisions, objective, restore_backbone, weight_sha256,
-)
+from infer import load_head, publish_predictions, submission_names, validate_predictions
+from model import FireMIL, FrozenDino, fire_decisions, objective, weight_sha256
 from tiles import IGNORE, coco_box_to_xyxy, open_rgb, tile_boxes, tile_labels
 
 
@@ -113,6 +112,38 @@ class ModelTests(unittest.TestCase):
             torch.testing.assert_close(expected, actual)
         self.assertEqual(fire_decisions(torch.tensor([-2.0, 0.0, 2.0]), SETTINGS).tolist(), [0, 1, 1])
 
+    def test_instance_only_gradient_and_shared_abmil_input(self):
+        model = FireMIL(SETTINGS)
+        features = torch.ones(1, 3, SETTINGS["backbone"]["feature_dim"], dtype=torch.bfloat16)
+        mask = torch.tensor([[True, True, False]])
+        observed = {}
+        projector = model.projection.register_forward_hook(
+            lambda module, inputs, output: observed.update(projected=output))
+        bag = model.bag.register_forward_pre_hook(
+            lambda module, inputs: observed.update(bag=inputs[0]))
+        instance = model.instance.register_forward_pre_hook(
+            lambda module, inputs: observed.update(instance=inputs[0]))
+        with torch.no_grad():
+            model.instance.weight.fill_(1 / features.shape[-1])
+            model.instance.bias.zero_()
+        try:
+            bag_logits, tile_logits = model(features, mask)
+        finally:
+            projector.remove()
+            bag.remove()
+            instance.remove()
+        self.assertIs(observed["bag"], observed["projected"])
+        self.assertIs(observed["instance"], observed["projected"])
+        _, _, instance_loss = objective(bag_logits, tile_logits, torch.tensor([1.0]),
+                                         torch.tensor([[IGNORE, 1, IGNORE]]),
+                                         mask, torch.tensor(1.0), 0.30)
+        instance_loss.backward()
+        gradient = model.projection.weight.grad
+        self.assertIsNotNone(gradient)
+        self.assertTrue(gradient.isfinite().all().item())
+        self.assertGreater(gradient.norm().item(), 0.0)
+        self.assertTrue(all(p.grad is None for p in model.bag.parameters()))
+
     def test_last_head_load_complete_and_reject_mismatch(self):
         settings = {**SETTINGS, "device": "cpu"}
         model = FireMIL(settings)
@@ -131,56 +162,74 @@ class ModelTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_head(path, settings, "fixture")
 
-    @unittest.skipUnless(SOURCE, "Set FIRE_MIL_DINOV3_SOURCE to the pinned Meta source tree")
-    def test_official_code_bf16_forward_and_synthetic_weight_load(self):
-        device = SETTINGS["device"] if torch.cuda.is_available() else "cpu"
-        settings = {**SETTINGS, "device": device}
-        source = Path(SOURCE)
-        backbone = build_backbone(source, settings["backbone"])
+    def test_model_rejects_unverified_native_weight_file(self):
         with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as temp:
             root = Path(temp)
-            fixture = root / "synthetic.pth"
-            save_pt(fixture, backbone.state_dict())
-            other = build_backbone(source, settings["backbone"])
-            restore_backbone(other, fixture)
-            torch.testing.assert_close(backbone.cls_token, other.cls_token)
-            with self.assertRaises(ValueError):
-                weight_sha256(fixture, settings["backbone"])
-            del backbone
-            encoder = FrozenDino(other, settings, device)
-            self.assertTrue(all(not p.requires_grad for p in encoder.backbone.parameters()))
-            path = root / "synthetic.png"
-            Image.new("RGB", (1024, 512), color=(105, 120, 135)).save(path)
-            image = open_rgb(path)
-            if device.startswith("cuda"):
-                torch.cuda.synchronize()
-                torch.cuda.reset_peak_memory_stats()
-            tensors = encoder.encode(image)
-            if device.startswith("cuda"):
-                torch.cuda.synchronize()
-                peak_mib = torch.cuda.max_memory_allocated() / 2**20
-                print(f"CUDA synthetic encoder peak allocated: {peak_mib:.1f} MiB")
-                self.assertLess(peak_mib, 4096)
-            tiles = tile_boxes(*image.size, settings["tiles"])
-            self.assertGreater(len(tiles), settings["backbone"]["encode_batch_size"])
-            self.assertEqual(tensors.shape, (len(tiles), 384))
-            self.assertEqual(tensors.dtype, torch.bfloat16)
-            model = FireMIL(settings).eval().to(device)
-            decision = predict_image(path, encoder, model, settings)
-            self.assertIn(decision, (0, 1))
-            submission = root / "submission.json"
-            write_json(submission, {path.name: decision})
-            self.assertEqual(read_json(submission), {path.name: decision})
+            path = root / SETTINGS["backbone"]["weights_name"]
+            path.write_bytes(b"not a verified checkpoint")
+            with patch("model.build_backbone") as build:
+                with self.assertRaisesRegex(ValueError, "SHA-256"):
+                    FrozenDino.from_pretrained(root, path, SETTINGS)
+                build.assert_not_called()
 
     @unittest.skipUnless(SOURCE and WEIGHTS, "Set FIRE_MIL_DINOV3_WEIGHTS to an authorized Meta S/16 checkpoint")
     def test_pretrained_checkpoint_strict_load(self):
         device = SETTINGS["device"] if torch.cuda.is_available() else "cpu"
         settings = {**SETTINGS, "device": device}
         path = Path(WEIGHTS)
-        weight_sha256(path, settings["backbone"])
+        digest = weight_sha256(path, settings["backbone"])
         encoder = FrozenDino.from_pretrained(Path(SOURCE), path, settings)
-        result = encoder.encode(Image.new("RGB", (224, 224)))
-        self.assertEqual(result.shape, (2, 384))
+        self.assertTrue(all(not p.requires_grad for p in encoder.backbone.parameters()))
+        image = Image.new("RGB", (1024, 512))
+        result = encoder.encode(image)
+        self.assertEqual(result.shape, (len(tile_boxes(*image.size, settings["tiles"])), 384))
+        self.assertEqual(result.dtype, torch.bfloat16)
+        print(f"Verified official {path.name} SHA-256 {digest}, strict load, shape {tuple(result.shape)}")
+
+
+class SubmissionTests(unittest.TestCase):
+    def test_5313_synthetic_filenames_round_trip(self):
+        count = SETTINGS["submission_image_count"]
+        self.assertEqual(count, 5313)
+        paths = [Path(f"synthetic_{index:04}.jpg") for index in range(count)]
+        names = submission_names(paths, count)
+        predictions = {path.name: index % 2 for index, path in enumerate(paths)}
+        with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as temp:
+            output = Path(temp) / "submission.json"
+            publish_predictions(output, predictions, names)
+            self.assertEqual(read_json(output), predictions)
+            with self.assertRaises(FileExistsError):
+                publish_predictions(output, predictions, names)
+
+    def test_submission_rejects_count_and_duplicate_names(self):
+        with self.assertRaisesRegex(ValueError, "Expected 5313"):
+            submission_names([Path("one.jpg")], SETTINGS["submission_image_count"])
+        for duplicate in ("one.jpg", "ONE.JPG"):
+            with self.subTest(duplicate=duplicate):
+                with self.assertRaisesRegex(ValueError, "unique"):
+                    submission_names([Path("one.jpg"), Path("other") / duplicate], 2)
+
+    def test_submission_rejects_bad_keyset_or_labels(self):
+        expected = {"one.jpg", "two.jpg"}
+        for predictions in (
+            {"one.jpg": 0}, {"one.jpg": 0, "extra.jpg": 1},
+            {"one.jpg": 0, "two.jpg": 1, "extra.jpg": 0},
+            {"one.jpg": 0, "two.jpg": True}, {"one.jpg": 0, "two.jpg": 1.0},
+            {"one.jpg": 0, "two.jpg": "1"}, {"one.jpg": 0, "two.jpg": 2},
+        ):
+            with self.subTest(predictions=predictions):
+                with self.assertRaises(ValueError):
+                    validate_predictions(predictions, expected)
+
+    def test_invalid_staged_json_never_published(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as temp:
+            output = Path(temp) / "submission.json"
+            for content in ('{"one.jpg": 1, "one.jpg": 1}', '{"one.jpg": 0}', '{"one.jpg":'):
+                with self.subTest(content=content), patch("infer.write_json") as writer:
+                    writer.side_effect = lambda path, values: path.write_text(content, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        publish_predictions(output, {"one.jpg": 1}, {"one.jpg"})
+                    self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
