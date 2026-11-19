@@ -12,11 +12,12 @@ from data import Bags, collate_bags, fill_cache, training_records
 from infer import load_head, publish_predictions, submission_names, validate_predictions
 from model import FireMIL, FrozenDino, fire_decisions, objective, weight_sha256
 from tiles import IGNORE, coco_box_to_xyxy, open_rgb, tile_boxes, tile_labels
+from train import initialize_run
 
 
 SETTINGS = config()
-SOURCE = os.environ.get("FIRE_MIL_DINOV3_SOURCE")
-WEIGHTS = os.environ.get("FIRE_MIL_DINOV3_WEIGHTS")
+SOURCE = os.environ.get("FIRE_MIL_DINOV2_SOURCE")
+WEIGHTS = os.environ.get("FIRE_MIL_DINOV2_WEIGHTS")
 TEMP_ROOT = os.environ.get("FIRE_MIL_TEST_TMP")
 
 
@@ -157,6 +158,11 @@ class ModelTests(unittest.TestCase):
                 torch.testing.assert_close(value, restored.state_dict()[name])
             with self.assertRaises(ValueError):
                 load_head(path, settings, "different")
+            checkpoint["identity"]["config"] = {**settings, "schema_version": 2}
+            save_pt(path, checkpoint)
+            with self.assertRaisesRegex(ValueError, "locked configuration"):
+                load_head(path, settings, "fixture")
+            checkpoint["identity"]["config"] = settings
             checkpoint["epoch"] = 49
             save_pt(path, checkpoint)
             with self.assertRaises(ValueError):
@@ -165,14 +171,26 @@ class ModelTests(unittest.TestCase):
     def test_model_rejects_unverified_native_weight_file(self):
         with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as temp:
             root = Path(temp)
-            path = root / SETTINGS["backbone"]["weights_name"]
+            metadata = SETTINGS["backbone"]
+            path = root / metadata["weights_name"]
             path.write_bytes(b"not a verified checkpoint")
             with patch("model.build_backbone") as build:
+                with self.assertRaisesRegex(ValueError, "checkpoint size"):
+                    FrozenDino.from_pretrained(root, path, SETTINGS)
+                with path.open("r+b") as stream:
+                    stream.truncate(metadata["weights_bytes"])
                 with self.assertRaisesRegex(ValueError, "SHA-256"):
                     FrozenDino.from_pretrained(root, path, SETTINGS)
                 build.assert_not_called()
 
-    @unittest.skipUnless(SOURCE and WEIGHTS, "Set FIRE_MIL_DINOV3_WEIGHTS to an authorized Meta S/16 checkpoint")
+    def test_previous_cache_identity_rejected_on_resume(self):
+        with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as temp:
+            run = Path(temp)
+            write_json(run / "run.json", {"config": {**SETTINGS, "schema_version": 2}})
+            with self.assertRaisesRegex(ValueError, "Resume requires the same"):
+                initialize_run(run, {"config": SETTINGS}, resume=True)
+
+    @unittest.skipUnless(SOURCE and WEIGHTS, "Set FIRE_MIL_DINOV2_SOURCE and FIRE_MIL_DINOV2_WEIGHTS")
     def test_pretrained_checkpoint_strict_load(self):
         device = SETTINGS["device"] if torch.cuda.is_available() else "cpu"
         settings = {**SETTINGS, "device": device}
@@ -184,6 +202,7 @@ class ModelTests(unittest.TestCase):
         result = encoder.encode(image)
         self.assertEqual(result.shape, (len(tile_boxes(*image.size, settings["tiles"])), 384))
         self.assertEqual(result.dtype, torch.bfloat16)
+        self.assertTrue(result.isfinite().all().item())
         print(f"Verified official {path.name} SHA-256 {digest}, strict load, shape {tuple(result.shape)}")
 
 

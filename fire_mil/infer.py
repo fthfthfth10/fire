@@ -76,7 +76,7 @@ def main():
     inputs = parser.add_mutually_exclusive_group(required=True)
     inputs.add_argument("--image", type=Path)
     inputs.add_argument("--images", type=Path, help="Directory of exactly 5313 test images")
-    parser.add_argument("--dinov3-source", type=Path, required=True)
+    parser.add_argument("--dinov2-source", type=Path, required=True)
     parser.add_argument("--weights", type=Path, required=True)
     parser.add_argument("--last", type=Path, required=True)
     parser.add_argument("--output", type=Path)
@@ -97,7 +97,7 @@ def main():
 
     digest = weight_sha256(args.weights, settings["backbone"])
     model = load_head(args.last, settings, digest)
-    encoder = FrozenDino.from_pretrained(args.dinov3_source, args.weights, settings)
+    encoder = FrozenDino.from_pretrained(args.dinov2_source, args.weights, settings)
     predictions = {path.name: predict_image(path, encoder, model, settings) for path in paths}
     if output is not None:
         publish_predictions(output, predictions, expected_names)

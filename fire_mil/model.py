@@ -14,7 +14,8 @@ from tiles import tile_boxes, tile_tensor
 
 def source_sha256(source):
     digest = hashlib.sha256()
-    paths = [source / "hubconf.py", *sorted((source / "dinov3").rglob("*.py"))]
+    files = (source / "dinov2").rglob("*.py")
+    paths = [source / "hubconf.py", *sorted(files, key=lambda p: p.relative_to(source).as_posix())]
     for path in paths:
         digest.update(path.relative_to(source).as_posix().encode() + b"\0")
         digest.update(hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).digest())
@@ -24,28 +25,33 @@ def source_sha256(source):
 def build_backbone(source, settings):
     source = source.resolve()
     if source_sha256(source) != settings["source_sha256"]:
-        raise ValueError(f"DINOv3 source does not match commit {settings['commit']}")
-    # Import the exact factory exported by hubconf.py without importing its
-    # unrelated segmentation, detection and text model entry points.
+        raise ValueError(f"DINOv2 source does not match commit {settings['commit']}")
+    # Use the official factory without importing unrelated hub entry points.
     sys.path.insert(0, str(source))
     try:
-        module = import_module("dinov3")
-        if Path(module.__file__).resolve().parent != source / "dinov3":
-            raise RuntimeError("A different DINOv3 package is already imported")
-        backbones = import_module("dinov3.hub.backbones")
-        backbone = backbones.dinov3_vits16(pretrained=False)
+        module = import_module("dinov2")
+        if Path(module.__file__).resolve().parent != source / "dinov2":
+            raise RuntimeError("A different DINOv2 package is already imported")
+        backbones = import_module("dinov2.hub.backbones")
+        backbone = backbones.dinov2_vits14_reg(pretrained=False)
     finally:
         sys.path.pop(0)
-    if backbone.embed_dim != settings["feature_dim"] or backbone.patch_size != 16:
-        raise ValueError("Expected a 384-dimensional DINOv3 ViT-S/16")
+    if (backbone.embed_dim, backbone.patch_size, backbone.num_register_tokens) != (
+        settings["feature_dim"], settings["patch_size"], settings["register_tokens"]
+    ):
+        raise ValueError("Expected a 384-dimensional DINOv2 ViT-S/14 with four registers")
+    if settings["input_size"] % backbone.patch_size:
+        raise ValueError("DINOv2 input size must be divisible by its patch size")
     return backbone
 
 
 def weight_sha256(weights, settings):
     if not weights.is_file():
-        raise FileNotFoundError(f"Official Meta S/16 checkpoint required: {weights}")
+        raise FileNotFoundError(f"Official Meta DINOv2 S/14 Reg4 checkpoint required: {weights}")
+    if weights.stat().st_size != settings["weights_bytes"]:
+        raise ValueError(f"Unexpected checkpoint size for {settings['weights_name']}")
     digest = sha256_file(weights)
-    if not digest.startswith(settings["weights_sha256_prefix"]):
+    if digest != settings["weights_sha256"]:
         raise ValueError(f"Checkpoint SHA-256 does not match {settings['weights_name']}: {digest}")
     return digest
 
@@ -89,7 +95,7 @@ class FrozenDino:
         if features.shape != (len(boxes), self.backbone_settings["feature_dim"]):
             raise RuntimeError(f"Unexpected DINOv3 features {tuple(features.shape)}")
         if not torch.isfinite(features).all():
-            raise FloatingPointError("DINOv3 produced nonfinite features")
+            raise FloatingPointError("DINOv2 produced nonfinite features")
         return features
 
 

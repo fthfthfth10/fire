@@ -95,8 +95,8 @@ def train(args):
             print("50 epochs are already complete.", flush=True)
             return
 
-        cache = run / "features"
-        fill_cache(cache, samples, lambda: FrozenDino.from_pretrained(args.dinov3_source, args.weights, settings),
+        cache = run / f"features-v{settings['feature_cache_version']}"
+        fill_cache(cache, samples, lambda: FrozenDino.from_pretrained(args.dinov2_source, args.weights, settings),
                    settings)
         torch.cuda.empty_cache()
         dataset = Bags(cache, samples, settings["backbone"]["feature_dim"])
@@ -123,7 +123,7 @@ def train(args):
 def main():
     parser = argparse.ArgumentParser(description="Train MIL heads on all 1100 training images.")
     parser.add_argument("--train-data", type=Path, required=True)
-    parser.add_argument("--dinov3-source", type=Path, required=True)
+    parser.add_argument("--dinov2-source", type=Path, required=True)
     parser.add_argument("--weights", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
