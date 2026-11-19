@@ -1,0 +1,6 @@
+/.local/
+/runs/
+/weights/
+__pycache__/
+*.pt
+*.pth

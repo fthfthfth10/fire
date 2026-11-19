@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "seed": 42,
+  "epochs": 50,
+  "device": "cuda:0",
+  "backbone": {
+    "commit": "6876159a11b4df116f30f667f8c9888617df0751",
+    "source_sha256": "0ded74a9f4047bcc6bf663ab274260a670af38d0d2b82dd6c77cc51997d9b621",
+    "weights_name": "dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
+    "weights_sha256_prefix": "08c60483",
+    "feature_dim": 384,
+    "input_size": 224,
+    "encode_batch_size": 16
+  },
+  "tiles": {
+    "scales_px": [224, 448],
+    "stride_fraction": 0.75,
+    "positive_box_coverage": 0.50
+  },
+  "mil": {
+    "attention_dim": 128,
+    "batch_size": 8,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.01,
+    "instance_loss_weight": 0.30
+  },
+  "fire_probability_threshold": 0.50
+}
