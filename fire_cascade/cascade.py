@@ -85,7 +85,10 @@ def detections(detector, paths, config, confidence):
     for path, result in zip(paths, results):
         if path.name != os.path.basename(result.path):
             raise RuntimeError(f"YOLO prediction order mismatch for {path}")
-        yield result.orig_img, result.boxes.data.cpu().tolist()
+        # A candidate entirely within letterbox padding can collapse at the image edge.
+        boxes = [box for box in result.boxes.data.cpu().tolist()
+                 if box[2] > box[0] and box[3] > box[1]]
+        yield result.orig_img, boxes
 
 
 def load_head(path):
