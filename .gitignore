@@ -1,0 +1,12 @@
+/.venv/
+/data/
+/fire_cascade/assets/
+/fire_cascade/runs/
+/fire_cascade/ultralytics_settings/
+/Ultralytics/
+__pycache__/
+*.pyc
+*.pt
+*.pth
+*.safetensors
+*.log

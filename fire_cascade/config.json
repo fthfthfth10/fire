@@ -1,0 +1,15 @@
+{
+  "seed": 42,
+  "epochs": 50,
+  "image_size": 640,
+  "yolo_batch": 16,
+  "workers": 2,
+  "clip_batch": 64,
+  "predict_batch": 16,
+  "candidate_confidence": 0.25,
+  "nms_iou": 0.45,
+  "auto_keep_confidence": 0.70,
+  "crop_margin": 0.20,
+  "clip_fire_probability": 0.50,
+  "mining_confidence": 0.10
+}
