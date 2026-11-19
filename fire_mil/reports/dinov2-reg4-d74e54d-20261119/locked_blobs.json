@@ -1,0 +1,17 @@
+{
+  "commit": "d74e54d01884d6d5a44cd42aa7cda2d3f0499626",
+  "blobs": {
+    ".gitignore": "eae6eb2206db097b383909986a2ac69e62dd0cc4",
+    "AUDIT.md": "e1d9794487138896fd6bb946c3f0c376f9e467ad",
+    "common.py": "02fdcee6af021aef495309584c705aa2567e14c5",
+    "config.json": "26ce5c92b3768c051d9912e64ad0885ac1688223",
+    "data.py": "f504d5e04fa6d73a57b3527c9cdb0fc18f71887e",
+    "infer.py": "4c5f0c5228ad3b807bfeb9d0b8463001950bd486",
+    "model.py": "807d2c41f4ac086ce93f1db0de90a48e826f6fde",
+    "README.md": "6595cfac0bdcecc4728e75bc31cb49588ec342b0",
+    "requirements.txt": "e491661c110c25823f52724b546c886b419ec3a3",
+    "test_mil.py": "da83f4101d8be3e110db5ccb2528c3b86161f1bb",
+    "tiles.py": "c52ed4467909bfc8b5b2c8855f4b77b7c84ffcc1",
+    "train.py": "637e0d0ac5fb128cd7cd1500b895d9fdf7a10274"
+  }
+}
