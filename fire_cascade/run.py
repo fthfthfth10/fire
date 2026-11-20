@@ -126,7 +126,7 @@ def predict_test(run, config):
     print(f"Saved {len(predictions)} image predictions to {submission}", flush=True)
 
 
-def score_boxes(run):
+def score_boxes(run, *, sampled=False):
     from cascade import sha256
 
     submission = run / "submission.json"
@@ -140,7 +140,7 @@ def score_boxes(run):
         return
     labels = {p.stem: p for p in directory.glob("*.txt")}
     expected = {Path(name).stem for name in predictions}
-    if len(expected) != len(predictions) or labels.keys() != expected:
+    if len(expected) != len(predictions) or not expected <= labels.keys() or (not sampled and labels.keys() != expected):
         raise ValueError("Test labels cannot be independently paired with the complete submission")
     tp = fp = fn = tn = 0
     for name, prediction in predictions.items():
@@ -161,7 +161,10 @@ def score_boxes(run):
                "submission_sha256": completed["submission_sha256"],
                "F1": 2 * tp / denominator if denominator else 0.0,
                "TP": tp, "FP": fp, "FN": fn, "TN": tn}
-    write_json(run / "local_test_f1.json", metrics)
+    if sampled:
+        metrics.update(precision=tp / (tp + fp) if tp + fp else 0.0, recall=tp / (tp + fn) if tp + fn else 0.0,
+                       threshold=completed["threshold"], sample_sha256=completed["sample_sha256"])
+    write_json(run / ("score.json" if sampled else "local_test_f1.json"), metrics)
     print(metrics, flush=True)
 
 

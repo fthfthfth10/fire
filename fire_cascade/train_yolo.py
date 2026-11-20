@@ -8,6 +8,8 @@ from ultralytics.utils.torch_utils import autocast
 
 
 class TrainOnlyDetector(DetectionTrainer):
+    expected_images = 1100
+
     def get_dataset(self):
         images = Path(self.args.data).resolve()
         if not images.is_dir():
@@ -18,8 +20,8 @@ class TrainOnlyDetector(DetectionTrainer):
         if mode == "val":
             return None
         loader = super().get_dataloader(dataset_path, batch_size, rank, mode)
-        if len(loader.dataset) != 1100:
-            raise ValueError(f"Expected 1100 usable training pairs, found {len(loader.dataset)}")
+        if len(loader.dataset) != self.expected_images:
+            raise ValueError(f"Expected {self.expected_images} usable training pairs, found {len(loader.dataset)}")
         return loader
 
     def get_validator(self):
@@ -58,8 +60,8 @@ class TrainOnlyDetector(DetectionTrainer):
             self.last = final
 
 
-def trainer_for(run, config, name):
-    return TrainOnlyDetector(overrides={
+def trainer_for(run, config, name, trainer_class=TrainOnlyDetector):
+    return trainer_class(overrides={
         "model": str(YOLO_PRETRAIN), "task": "detect",
         "data": str(run / "training_data" / "images"),
         "project": str(run), "name": name, "exist_ok": False,
@@ -73,8 +75,8 @@ def trainer_for(run, config, name):
     })
 
 
-def check_yolo(run, config):
-    trainer = trainer_for(run, config, "yolo_check")
+def check_yolo(run, config, trainer_class=TrainOnlyDetector):
+    trainer = trainer_for(run, config, "yolo_check", trainer_class)
     trainer._setup_train()
     trainer.model.train()
     torch.cuda.reset_peak_memory_stats()

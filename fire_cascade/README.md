@@ -23,3 +23,16 @@ py -3.10 -m venv .venv
 ```
 
 每阶段的日志位于运行目录。输出为 `yolo/weights/last.pt`、`clip/last.pt`、`submission.json`。提交按照完整原始文件名映射到整数 0 或 1。测试推理只有在两个最后权重校验通过后才运行，目录内的测试标记防止重复进行整集推理。提交落盘并核验后，评分步骤才读取 `data/test/labels`，将含类 0 框的图片转为图像级真值，记录本地 F1 与混淆计数。官方平台分数需要独立的正式评分记录。
+
+## 仅训练与评估 YOLOv8n
+
+`run_yolov8_only.py` 不训练或加载 CLIP。它校验上一轮的训练数据指纹：原始 1100 张图保留类 0 的火焰框，`data/train/ai` 的 254 张与 `data/train/ai2` 的 200 张全部使用空标签。使用现有 COCO 预训练 `yolov8n.pt`、640 像素输入、BF16 和 50 轮训练，不划分验证集，不使用 `best.pt`。
+
+从仓库根目录运行，`--run` 必须是一个全新的目录：
+
+```powershell
+$env:PYTHONUTF8 = '1'
+.venv\Scripts\python.exe -u fire_cascade\run_yolov8_only.py --run fire_cascade\runs\yolov8n-ai454-new
+```
+
+训练验收后，以种子 `42` 从 5313 张测试图中无放回抽取 1000 张；有置信度超过 `0.50` 的类 0 框才判为有火。提交封存后读取对应的测试标签，输出 `score.json` 和 `submission.json`。训练产物为 `yolo/weights/last.pt` 和 `yolo/results.csv`。
