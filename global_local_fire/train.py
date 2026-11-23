@@ -57,9 +57,20 @@ def image_f1(scores, targets, threshold):
     return 2 * tp / denominator if denominator else 0.0
 
 
-def save_checkpoint(path, model, optimizer, epoch, settings, identity, f1):
+def selection_key(row):
+    threshold = row["threshold"]
+    return row["f1"], -round(abs(threshold - 0.5), 12), -threshold
+
+
+def select_threshold(scores, targets, thresholds):
+    grid = [{"threshold": threshold, "f1": image_f1(scores, targets, threshold)} for threshold in thresholds]
+    return max(grid, key=selection_key), grid
+
+
+def save_checkpoint(path, model, optimizer, epoch, settings, identity, selected, grid):
     temporary = path.with_suffix(".pt.tmp")
-    torch.save({"format": 1, "epoch": epoch, "config": settings, "identity": identity, "val_f1_at_fixed": f1,
+    torch.save({"format": 2, "epoch": epoch, "config": settings, "identity": identity,
+                "validation_selected": selected, "validation_grid": grid,
                 "model": model.state_dict(), "optimizer": optimizer.state_dict()}, temporary)
     temporary.replace(path)
 
@@ -69,18 +80,16 @@ def train(args):
     if (settings["seed"], settings["epochs"]) != (42, 100):
         raise ValueError("This entry point requires seed 42 and 100 epochs")
     root = ROOT / settings["dataset_dir"]
-    training, validation = checked_splits(root, args.smoke_manifest)
-    documented_smoke = sum(len(row.smoke) for row in training)
-    if not documented_smoke:
-        raise ValueError("No verified Smoke boxes. Supply --smoke-manifest for this dataset before training")
+    if args.run.exists():
+        raise FileExistsError(args.run)
+    training, validation = checked_splits(root)
     for row in training + validation:
         if sha256(row.path) != row.digest:
             raise ValueError(f"Dataset image bytes disagree with the manifest: {row.path.name}")
     identity = {"ultralytics": ULTRALYTICS_VERSION, "train_manifest_sha256": sha256(root / "train.json"),
                 "validation_manifest_sha256": sha256(root / "validation.json"),
-                "smoke_manifest_sha256": sha256(args.smoke_manifest), "train_images": len(training),
-                "validation_images": len(validation), "smoke_boxes": documented_smoke,
-                "smoke_reviewed_images": sum(row.smoke_reviewed for row in training)}
+                "train_images": len(training), "validation_images": len(validation),
+                "pretrained_sha256": settings["pretrained_sha256"], "detection_classes": {"0": "Fire"}}
     if len({row.label for row in validation}) != 2:
         raise ValueError("Validation must contain both image-level classes")
     device = cuda_device(settings)
@@ -100,12 +109,12 @@ def train(args):
     write_json(args.run / "config.json", settings)
     write_json(args.run / "training_identity.json", identity)
     names = ("detection", "global", "mil", "fusion")
-    best_f1 = -1.0
+    best_key = None
     last = args.run / "last.pt"
     best = args.run / "best.pt"
     with (args.run / "training.csv").open("x", encoding="utf-8", newline="") as stream:
         log = csv.writer(stream)
-        log.writerow(("epoch", *names, "validation_f1_at_fixed", "peak_allocated_bytes"))
+        log.writerow(("epoch", *names, "validation_f1", "validation_threshold", "peak_allocated_bytes"))
         for epoch in range(1, settings["epochs"] + 1):
             model.train()
             torch.cuda.reset_peak_memory_stats(device)
@@ -133,30 +142,29 @@ def train(args):
                 for key in names:
                     averages[key] += parts[key].detach().item() * batch_size / len(training)
                 del output, loss, parts
+                if (index + 1) % 1000 == 0:
+                    print(f"Epoch {epoch:03d}: batch {index + 1}/{len(batches)}", flush=True)
             values, targets = collect_validation(model, validate, device)
-            metric = image_f1(values, targets, settings["checkpoint_threshold"])
-            save_checkpoint(last, model, optimizer, epoch, settings, identity, metric)
-            if metric > best_f1:
-                best_f1 = metric
-                save_checkpoint(best, model, optimizer, epoch, settings, identity, metric)
-            log.writerow((epoch, *(averages[name] for name in names), metric, torch.cuda.max_memory_allocated(device)))
+            selected, grid = select_threshold(values, targets, settings["validation_thresholds"])
+            save_checkpoint(last, model, optimizer, epoch, settings, identity, selected, grid)
+            if best_key is None or selection_key(selected) > best_key:
+                best_key = selection_key(selected)
+                save_checkpoint(best, model, optimizer, epoch, settings, identity, selected, grid)
+            log.writerow((epoch, *(averages[name] for name in names), selected["f1"], selected["threshold"],
+                          torch.cuda.max_memory_allocated(device)))
             stream.flush()
-            print(f"Epoch {epoch:03d}: {averages}; validation F1={metric:.6f}", flush=True)
+            print(f"Epoch {epoch:03d}: {averages}; validation {selected}", flush=True)
     chosen = torch.load(best, map_location="cpu", weights_only=True)
     model.load_state_dict(chosen["model"], strict=True)
-    values, targets = collect_validation(model, validate, device)
-    results = [{"threshold": threshold, "f1": image_f1(values, targets, threshold)}
-               for threshold in settings["validation_thresholds"]]
-    selected = max(results, key=lambda row: (row["f1"], -abs(row["threshold"] - 0.5), -row["threshold"]))
     write_json(args.run / "validation_threshold.json", {
         "split": "validation", "manifest_sha256": identity["validation_manifest_sha256"],
         "best_epoch": chosen["epoch"], "completed_epochs": settings["epochs"], "best_sha256": sha256(best),
-        "selected": selected, "grid": results,
+        "selected": chosen["validation_selected"], "grid": chosen["validation_grid"],
     })
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    for option in ("pretrained", "smoke-manifest", "run"):
+    for option in ("pretrained", "run"):
         parser.add_argument(f"--{option}", type=Path, required=True)
     train(parser.parse_args())

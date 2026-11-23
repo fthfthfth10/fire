@@ -5,9 +5,9 @@ from pathlib import Path
 import torch
 
 from .data import checked_splits
-from .io_utils import PROJECT, ROOT, read_json
+from .io_utils import PROJECT, ROOT, read_json, sha256
 from .model import GlobalLocalFire, JointLoss, STRIDES
-from .train import cuda_device, image_f1
+from .train import cuda_device, image_f1, select_threshold
 
 
 def check(pretrained):
@@ -19,6 +19,12 @@ def check(pretrained):
         raise ValueError(f"Unexpected training/validation metadata: {counts}")
     if image_f1(torch.tensor([0.5, 0.2, 0.7]), torch.tensor([True, False, False]), 0.5) != 2 / 3:
         raise AssertionError("Image F1 threshold or denominator mismatch")
+    for row in train + val:
+        if sha256(row.path) != row.digest:
+            raise ValueError(f"File hash mismatch: {row.path.name}")
+    selected, _ = select_threshold(torch.tensor([0.9, 0.1]), torch.tensor([True, False]), [0.4, 0.6, 0.5])
+    if selected != {"threshold": 0.5, "f1": 1.0}:
+        raise AssertionError("Validation threshold tie-breaking does not prefer 0.50")
     torch.set_num_threads(2)
     torch.manual_seed(settings["seed"])
     device = cuda_device(settings)
@@ -27,9 +33,9 @@ def check(pretrained):
     size = settings["image_size"]
     images = torch.rand((2, 3, size, size), device=device)
     batch = {"labels": torch.tensor([1.0, 0.0], device=device),
-             "known": torch.tensor([[True, False], [True, True]], device=device),
-             "bboxes": torch.tensor([[0.5, 0.4, 0.08, 0.06], [0.4, 0.5, 0.12, 0.1]], device=device),
-             "cls": torch.tensor([0.0, 1.0], device=device), "batch_idx": torch.tensor([0, 1], device=device)}
+             "known": torch.tensor([True, True], device=device),
+             "bboxes": torch.tensor([[0.5, 0.4, 0.08, 0.06]], device=device),
+             "cls": torch.zeros(1, device=device), "batch_idx": torch.zeros(1, dtype=torch.long, device=device)}
     torch.cuda.reset_peak_memory_stats(device)
     with torch.autocast("cuda", dtype=torch.bfloat16):
         output = model(images, with_detection=True)
@@ -37,23 +43,24 @@ def check(pretrained):
     raw = output["detection"]
     anchors = sum(height * width for height, width in expected)
     if (tuple(tuple(feat.shape[-2:]) for feat in raw["feats"]) != expected
-            or raw["scores"].shape != (2, 2, anchors) or raw["boxes"].shape != (2, 64, anchors)
+            or raw["scores"].shape != (2, 1, anchors) or raw["boxes"].shape != (2, 64, anchors)
             or raw["scores"].dtype != torch.bfloat16 or any(output[key].shape != (2,) for key in
-                                                                   ("global", "mil", "smoke", "fusion"))):
+                                                                   ("global", "mil", "fusion"))):
         raise AssertionError("Unexpected pyramid or evidence shapes")
-    output["smoke"].retain_grad()
+    for name in ("global", "mil", "fusion"):
+        output[name].retain_grad()
     loss, terms = criterion(output, batch)
     if not loss.isfinite().item() or any(not term.isfinite().item() or term.item() <= 0 for term in terms.values()):
         raise FloatingPointError("Synthetic losses must be finite and positive")
     loss.backward()
-    gradients = {"fusion": model.fusion[-1].weight.grad, "smoke_via_fusion": output["smoke"].grad,
+    gradients = {"fusion": model.fusion[-1].weight.grad, "mil": output["mil"].grad,
                  "global": model.global_head.weight.grad, "P2_gate": model.gates[0].weight.grad,
                  "detector": model.detect.cv3[0][-1].weight.grad, "shared": next(model.neck.parameters()).grad}
     for name, gradient in gradients.items():
         if gradient is None or not gradient.isfinite().all().item() or not gradient.abs().max().item() > 0:
             raise AssertionError(f"Invalid gradient: {name}")
     torch.cuda.synchronize(device)
-    print(f"Manifest counts: {counts}; official Smoke sidecar not supplied to this check")
+    print(f"Manifest counts and file SHA-256 passed: {counts}; Fire is the only detection class")
     print(f"Transferred layers: {model.pretrained_layers}; strides: {STRIDES}; maps: {expected}; anchors: {anchors}")
     print(f"Losses: { {key: value.item() for key, value in terms.items()} }; gradients: {list(gradients)}")
     print(f"CUDA peak: {torch.cuda.max_memory_allocated(device) / 2**30:.3f} GiB allocated, "

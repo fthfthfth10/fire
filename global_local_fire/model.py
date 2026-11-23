@@ -8,7 +8,6 @@ import ultralytics
 from ultralytics.nn.tasks import DetectionModel, load_checkpoint, yaml_model_load
 from ultralytics.utils.loss import v8DetectionLoss
 
-from .data import FIRE, SMOKE
 from .io_utils import sha256
 
 
@@ -24,9 +23,9 @@ class GlobalLocalFire(nn.Module):
         arch = yaml_model_load("yolov8m-p2.yaml")
         if arch["scale"] != "m":
             raise RuntimeError("The upstream YAML did not resolve to YOLOv8m-P2")
-        detector = DetectionModel(arch, nc=2, verbose=False)
+        detector = DetectionModel(arch, nc=1, verbose=False)
         head = detector.model[-1]
-        if tuple(head.stride.tolist()) != STRIDES or head.nc != 2 or head.end2end:
+        if tuple(head.stride.tolist()) != STRIDES or head.nc != 1 or head.end2end:
             raise RuntimeError("Unexpected P2/P3/P4/P5 Detect head")
         self.pretrained_layers = self.transfer(detector, pretrained, settings["pretrained_sha256"]) if pretrained else 0
         self.neck = detector
@@ -46,7 +45,7 @@ class GlobalLocalFire(nn.Module):
         for gate in self.gates:
             nn.init.zeros_(gate.weight)
             nn.init.zeros_(gate.bias)
-        self.fusion = nn.Sequential(nn.Linear(3, 16), nn.SiLU(), nn.Linear(16, 1))
+        self.fusion = nn.Sequential(nn.Linear(2, 16), nn.SiLU(), nn.Linear(16, 1))
 
     @staticmethod
     def transfer(target, weights, expected_sha):
@@ -89,11 +88,9 @@ class GlobalLocalFire(nn.Module):
                                dim=2)
         else:
             scores = raw["scores"]
-        evidence = scores.float().topk(min(self.top_k, scores.shape[-1]), dim=-1).values.mean(dim=-1)
-        fire_logit, smoke_logit = evidence[:, FIRE], evidence[:, SMOKE]
-        fusion_logit = self.fusion(torch.stack((global_logit, fire_logit, smoke_logit), dim=1)).squeeze(1).float()
-        return {"detection": raw, "global": global_logit, "mil": fire_logit, "smoke": smoke_logit,
-                "fusion": fusion_logit}
+        fire_logit = scores[:, 0].float().topk(min(self.top_k, scores.shape[-1]), dim=-1).values.mean(dim=-1)
+        fusion_logit = self.fusion(torch.stack((global_logit, fire_logit), dim=1)).squeeze(1).float()
+        return {"detection": raw, "global": global_logit, "mil": fire_logit, "fusion": fusion_logit}
 
 
 class JointLoss:
@@ -107,7 +104,7 @@ class JointLoss:
         raw = output["detection"]
         fp32 = {"scores": raw["scores"].float(), "boxes": raw["boxes"].float(),
                 "feats": [feature[:, :1].float() for feature in raw["feats"]]}
-        known = batch["known"][:, None, :]
+        known = batch["known"][:, None, None]
         original_bce = self.detection.bce
         self.detection.bce = lambda scores, targets: original_bce(scores, targets) * known
         try:
