@@ -11,16 +11,22 @@ from .model import GlobalLocalFire
 from .train import cuda_device, loader, probabilities, selection_key
 
 
-def score_confirmed(labels_dir, submission, seal):
-    if sha256(submission) != seal["submission_sha256"]:
-        raise ValueError("The saved submission no longer matches its seal")
-    predictions = read_json(submission)
+OFFICIAL_LABEL_FILENAME = "testA_标注.json"
+
+
+def confirmed_truth(labels_dir, filenames):
+    if labels_dir.is_file() and labels_dir.suffix.lower() == ".json":
+        labels = read_json(labels_dir)
+        if (not isinstance(labels, dict) or labels.keys() != filenames
+                or any(type(value) is not int or value not in (0, 1) for value in labels.values())):
+            raise ValueError("Confirmed JSON must map every submitted filename to an integer 0 or 1")
+        return labels
     paths = {path.stem: path for path in labels_dir.glob("*.txt")}
-    stems = {Path(name).stem for name in predictions}
-    if len(stems) != len(predictions) or paths.keys() != stems:
+    stems = {Path(name).stem for name in filenames}
+    if len(stems) != len(filenames) or paths.keys() != stems:
         raise ValueError("Confirmed labels must uniquely cover every submitted filename")
-    tp = fp = fn = tn = 0
-    for name, prediction in predictions.items():
+    labels = {}
+    for name in filenames:
         truth = 0
         for line in paths[Path(name).stem].read_text(encoding="utf-8-sig").splitlines():
             fields = line.split()
@@ -30,11 +36,24 @@ def score_confirmed(labels_dir, submission, seal):
                     or not all(math.isfinite(float(value)) and 0 <= float(value) <= 1 for value in fields[1:])):
                 raise ValueError(f"Invalid YOLO truth for {name}")
             truth |= int(fields[0] == "0")
+        labels[name] = truth
+    return labels
+
+
+def score_confirmed(label_source, submission, seal):
+    if sha256(submission) != seal["submission_sha256"]:
+        raise ValueError("The saved submission no longer matches its seal")
+    predictions = read_json(submission)
+    labels = confirmed_truth(label_source, predictions.keys())
+    tp = fp = fn = tn = 0
+    for name, prediction in predictions.items():
+        truth = labels[name]
         tp += truth * prediction
         fp += (1 - truth) * prediction
         fn += truth * (1 - prediction)
         tn += (1 - truth) * (1 - prediction)
-    return {**seal, "TP": tp, "FP": fp, "FN": fn, "TN": tn,
+    source = {"label_file_sha256": sha256(label_source)} if label_source.is_file() else {}
+    return {**seal, **source, "TP": tp, "FP": fp, "FN": fn, "TN": tn,
             "f1": 2 * tp / (2 * tp + fp + fn) if tp + fp + fn else 0.0,
             "precision": tp / (tp + fp) if tp + fp else 0.0,
             "recall": tp / (tp + fn) if tp + fn else 0.0}
@@ -92,6 +111,10 @@ def infer(run, output, confirmed_labels=None):
     seal = {"images": len(predictions), "threshold": threshold, "best_sha256": selection["best_sha256"],
             "submission_sha256": sha256(output)}
     write_json(run / "official_test_complete.json", seal)
+    if confirmed_labels is None:
+        known_manifest = (ROOT / config["official_test_dir"]).parent / OFFICIAL_LABEL_FILENAME
+        if known_manifest.is_file():
+            confirmed_labels = known_manifest
     if confirmed_labels is not None:
         score = score_confirmed(confirmed_labels, output, seal)
         write_json(run / "score.json", score)
@@ -104,6 +127,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--confirmed-labels", type=Path, help="Explicitly verified YOLO labels: 0=Fire, 1=Smoke")
+    parser.add_argument("--confirmed-labels", type=Path,
+                        help="Verified image JSON (1=Fire) or YOLO truth directory (0=Fire, 1=Smoke)")
     args = parser.parse_args()
     infer(args.run, args.output, args.confirmed_labels)
